@@ -109,8 +109,12 @@ uv run python swin2_model.py \
 	--outdir runs/swin2-balanced-bs48 \
 	--backbone swinv2_cr_tiny_384 \
 	--backbone-preset balanced \
+	--epochs 200 \
+	--early-stop-patience 10 \
 	--batch_size 48
 ```
+
+Early stopping monitors validation loss and requires `--val-data`. The trainer still writes `best.pt` for the best validation-loss checkpoint even when the run stops before the configured epoch count.
 
 If you want to override the large-batch defaults, pass the tuning flags explicitly. Use `--scheduler none` to disable the automatic scheduler, or set your own scheduler/warmup values:
 

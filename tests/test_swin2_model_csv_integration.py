@@ -1,28 +1,27 @@
 import math
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pandas as pd
-from PIL import Image
 import pytest
 import torch
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import swin2_model
-
 from rodent_dataset import BODY_PARTS, coordinate_columns
 from swin2_model import (
     BACKBONE_PRESETS,
-    Config,
     IDX,
+    Config,
     K,
-    capture_tensorboard_example,
-    build_pose_model,
     build_argument_parser,
-    build_tensorboard_writer,
+    build_pose_model,
     build_runtime_components,
     build_subset_and_weights,
+    build_tensorboard_writer,
+    capture_tensorboard_example,
     config_from_args,
     decoded_keypoint_error,
     default_tensorboard_dir,
@@ -30,16 +29,30 @@ from swin2_model import (
     format_eval_metadata,
     format_kp_error_regression_alert,
     learning_rate_for_epoch,
+    load_checkpoint_runtime,
+    load_checkpoint_training_runtime,
     load_frame_items,
     load_frame_items_with_summary,
-    load_checkpoint_training_runtime,
-    load_checkpoint_runtime,
     load_template_Tn,
     main,
     render_keypoints_for_tensorboard,
     resolve_resume_tensorboard_dir,
     write_example_artifacts_to_tensorboard,
 )
+
+
+class DummySummaryWriter:
+    def add_text(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def add_scalar(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 def build_annotation_row(
@@ -202,6 +215,8 @@ def test_build_argument_parser_accepts_backbone_options() -> None:
             "0.4",
             "--min-lr-ratio",
             "0.2",
+            "--early-stop-patience",
+            "5",
         ]
     )
 
@@ -216,6 +231,13 @@ def test_build_argument_parser_accepts_backbone_options() -> None:
     assert args.warmup_epochs == 2
     assert args.warmup_start_factor == pytest.approx(0.4)
     assert args.min_lr_ratio == pytest.approx(0.2)
+    assert args.early_stop_patience == 5
+
+
+def test_config_from_args_accepts_early_stop_patience() -> None:
+    cfg = config_from_args(early_stop_patience=7)
+
+    assert cfg.early_stop_patience == 7
 
 
 @pytest.mark.parametrize(
@@ -304,10 +326,16 @@ def test_config_from_args_applies_accuracy_backbone_preset() -> None:
     )
 
     assert cfg.backbone_preset == "accuracy"
-    assert cfg.backbone_feature_index == BACKBONE_PRESETS["accuracy"]["backbone_feature_index"]
+    assert (
+        cfg.backbone_feature_index
+        == BACKBONE_PRESETS["accuracy"]["backbone_feature_index"]
+    )
     assert cfg.decoder_channels == BACKBONE_PRESETS["accuracy"]["decoder_channels"]
     assert override_cfg.backbone_feature_index == 1
-    assert override_cfg.decoder_channels == BACKBONE_PRESETS["accuracy"]["decoder_channels"]
+    assert (
+        override_cfg.decoder_channels
+        == BACKBONE_PRESETS["accuracy"]["decoder_channels"]
+    )
 
 
 def test_learning_rate_for_epoch_applies_warmup_and_cosine_decay() -> None:
@@ -321,7 +349,9 @@ def test_learning_rate_for_epoch_applies_warmup_and_cosine_decay() -> None:
         min_lr_ratio=0.1,
     )
 
-    lr_values = [learning_rate_for_epoch(cfg, epoch) for epoch in range(1, cfg.epochs + 1)]
+    lr_values = [
+        learning_rate_for_epoch(cfg, epoch) for epoch in range(1, cfg.epochs + 1)
+    ]
 
     assert lr_values[0] == pytest.approx(1e-5)
     assert lr_values[1] == pytest.approx(2e-5)
@@ -404,7 +434,9 @@ def test_render_keypoints_for_tensorboard_marks_points() -> None:
     assert rendered[0].sum().item() > 0.0
 
 
-def test_resolve_resume_tensorboard_dir_prefers_checkpoint_metadata(tmp_path: Path) -> None:
+def test_resolve_resume_tensorboard_dir_prefers_checkpoint_metadata(
+    tmp_path: Path,
+) -> None:
     outdir = tmp_path / "run"
     logdir = outdir / "tensorboard"
     checkpoint = {"tensorboard": {"logdir": str(logdir)}}
@@ -477,10 +509,12 @@ def test_load_checkpoint_runtime_supports_legacy_config_without_backbone(
         checkpoint_path,
     )
 
-    _checkpoint, loaded_cfg, loaded_model, _dist_head, _loss_hm, _loss_dist = load_checkpoint_runtime(
-        str(checkpoint_path),
-        batch_size=1,
-        num_workers=0,
+    _checkpoint, loaded_cfg, loaded_model, _dist_head, _loss_hm, _loss_dist = (
+        load_checkpoint_runtime(
+            str(checkpoint_path),
+            batch_size=1,
+            num_workers=0,
+        )
     )
 
     assert loaded_cfg.backbone == "resnet18"
@@ -567,6 +601,277 @@ def test_load_checkpoint_training_runtime_restores_optimizer_and_metadata(
     assert loaded_cfg.scheduler == "cosine"
     assert loaded_cfg.warmup_epochs == 2
     assert loaded_opt.param_groups[0]["lr"] == pytest.approx(7e-6)
+
+
+def test_main_requires_validation_data_for_early_stopping() -> None:
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--mode",
+                "train",
+                "--train-data",
+                "generated/rodent_annotations_train.csv",
+                "--template-data",
+                "generated/template.csv",
+                "--outdir",
+                "runs/example",
+                "--early-stop-patience",
+                "2",
+            ]
+        )
+
+
+def test_run_train_stops_early_after_patience(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = Config(
+        epochs=6,
+        batch_size=1,
+        num_workers=0,
+        pretrained=False,
+        early_stop_patience=2,
+        device="cpu",
+    )
+    subset_mask, kp_weight = build_subset_and_weights(cfg)
+    template_tn = torch.zeros(K, 2)
+    model = torch.nn.Linear(1, 1)
+    dist_head = torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(swin2_model, "config_from_args", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        swin2_model, "build_subset_and_weights", lambda _cfg: (subset_mask, kp_weight)
+    )
+    monkeypatch.setattr(swin2_model, "load_template_Tn", lambda *_args: template_tn)
+    monkeypatch.setattr(
+        swin2_model,
+        "build_runtime_components",
+        lambda *_args: (model, dist_head, torch.nn.MSELoss(), torch.nn.MSELoss()),
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "load_frame_items_with_summary",
+        lambda _path: ([object()], None),
+    )
+    monkeypatch.setattr(
+        swin2_model, "build_loader", lambda *_args, **_kwargs: [object()]
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "build_tensorboard_writer",
+        lambda _outdir, _logdir: (DummySummaryWriter(), str(tmp_path / "tensorboard")),
+    )
+    monkeypatch.setattr(
+        swin2_model, "write_metrics_to_tensorboard", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "write_example_artifacts_to_tensorboard",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        swin2_model, "format_kp_error_regression_alert", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "train_one_epoch",
+        lambda *_args, **_kwargs: {
+            "loss": 1.0,
+            "loss_hm": 0.5,
+            "loss_dist": 0.5,
+            "kp_error": 10.0,
+            "example": None,
+        },
+    )
+    eval_metrics = iter(
+        [
+            {
+                "loss": 1.0,
+                "loss_hm": 0.5,
+                "loss_dist": 0.5,
+                "kp_error": 9.0,
+                "example": None,
+            },
+            {
+                "loss": 0.9,
+                "loss_hm": 0.5,
+                "loss_dist": 0.4,
+                "kp_error": 8.0,
+                "example": None,
+            },
+            {
+                "loss": 0.95,
+                "loss_hm": 0.5,
+                "loss_dist": 0.45,
+                "kp_error": 8.5,
+                "example": None,
+            },
+            {
+                "loss": 0.96,
+                "loss_hm": 0.5,
+                "loss_dist": 0.46,
+                "kp_error": 8.6,
+                "example": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "eval_one_epoch",
+        lambda *_args, **_kwargs: next(eval_metrics),
+    )
+
+    args = build_argument_parser().parse_args(
+        [
+            "--mode",
+            "train",
+            "--train-data",
+            "train.csv",
+            "--val-data",
+            "val.csv",
+            "--template-data",
+            "template.csv",
+            "--outdir",
+            str(tmp_path / "out"),
+            "--early-stop-patience",
+            "2",
+        ]
+    )
+
+    result = swin2_model.run_train(args)
+
+    assert result == 0
+    assert (tmp_path / "out" / "ckpt_epoch_004.pt").exists()
+    assert not (tmp_path / "out" / "ckpt_epoch_005.pt").exists()
+    stopped_checkpoint = torch.load(tmp_path / "out" / "ckpt_epoch_004.pt")
+    best_checkpoint = torch.load(tmp_path / "out" / "best.pt")
+    assert stopped_checkpoint["epochs_without_improvement"] == 2
+    assert stopped_checkpoint["best_val_loss"] == pytest.approx(0.9)
+    assert best_checkpoint["epoch"] == 2
+    assert "early stopping at epoch 004" in capsys.readouterr().out
+
+
+def test_run_train_resume_preserves_early_stop_counter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = Config(
+        epochs=6,
+        batch_size=1,
+        num_workers=0,
+        pretrained=False,
+        early_stop_patience=2,
+        device="cpu",
+    )
+    subset_mask, kp_weight = build_subset_and_weights(cfg)
+    template_tn = torch.zeros(K, 2)
+    model = torch.nn.Linear(1, 1)
+    dist_head = torch.nn.Linear(1, 1)
+    opt = torch.optim.AdamW(
+        list(model.parameters()) + list(dist_head.parameters()),
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+    )
+    resume_checkpoint = {
+        "epoch": 3,
+        "cfg": cfg.__dict__,
+        "subset_mask": subset_mask,
+        "kp_weight": kp_weight,
+        "template_Tn": template_tn,
+        "val_loss": 0.8,
+        "best_val_loss": 0.8,
+        "val_kp_error": 7.5,
+        "best_val_kp_error": 7.5,
+        "epochs_without_improvement": 1,
+        "tensorboard": {"logdir": str(tmp_path / "tensorboard"), "last_epoch": 3},
+    }
+
+    monkeypatch.setattr(
+        swin2_model,
+        "load_checkpoint_training_runtime",
+        lambda *_args, **_kwargs: (
+            resume_checkpoint,
+            cfg,
+            model,
+            dist_head,
+            torch.nn.MSELoss(),
+            torch.nn.MSELoss(),
+            opt,
+        ),
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "load_frame_items_with_summary",
+        lambda _path: ([object()], None),
+    )
+    monkeypatch.setattr(
+        swin2_model, "build_loader", lambda *_args, **_kwargs: [object()]
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "build_tensorboard_writer",
+        lambda _outdir, _logdir: (DummySummaryWriter(), str(tmp_path / "tensorboard")),
+    )
+    monkeypatch.setattr(
+        swin2_model, "write_metrics_to_tensorboard", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "write_example_artifacts_to_tensorboard",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        swin2_model, "format_kp_error_regression_alert", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "train_one_epoch",
+        lambda *_args, **_kwargs: {
+            "loss": 1.0,
+            "loss_hm": 0.5,
+            "loss_dist": 0.5,
+            "kp_error": 10.0,
+            "example": None,
+        },
+    )
+    monkeypatch.setattr(
+        swin2_model,
+        "eval_one_epoch",
+        lambda *_args, **_kwargs: {
+            "loss": 0.81,
+            "loss_hm": 0.5,
+            "loss_dist": 0.31,
+            "kp_error": 7.6,
+            "example": None,
+        },
+    )
+
+    args = build_argument_parser().parse_args(
+        [
+            "--mode",
+            "train",
+            "--train-data",
+            "train.csv",
+            "--val-data",
+            "val.csv",
+            "--outdir",
+            str(tmp_path / "out"),
+            "--resume-checkpoint",
+            str(tmp_path / "resume.pt"),
+        ]
+    )
+
+    result = swin2_model.run_train(args)
+
+    assert result == 0
+    assert (tmp_path / "out" / "ckpt_epoch_004.pt").exists()
+    assert not (tmp_path / "out" / "ckpt_epoch_005.pt").exists()
+    stopped_checkpoint = torch.load(tmp_path / "out" / "ckpt_epoch_004.pt")
+    assert stopped_checkpoint["epochs_without_improvement"] == 2
+    assert stopped_checkpoint["best_val_loss"] == pytest.approx(0.8)
+    assert "early stopping at epoch 004" in capsys.readouterr().out
 
 
 def test_format_checkpoint_provenance_includes_run_details() -> None:

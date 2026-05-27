@@ -172,6 +172,7 @@ class Config:
     warmup_epochs: int = 0
     warmup_start_factor: float = 0.5
     min_lr_ratio: float = 0.1
+    early_stop_patience: int | None = None
 
     # Soft-argmax
     softargmax_beta: float = 50.0
@@ -1246,6 +1247,7 @@ def config_from_args(
     warmup_epochs: int | None = None,
     warmup_start_factor: float | None = None,
     min_lr_ratio: float | None = None,
+    early_stop_patience: int | None = None,
     backbone: str | None = None,
     backbone_preset: str | None = None,
     pretrained: bool | None = None,
@@ -1274,6 +1276,8 @@ def config_from_args(
         cfg.warmup_start_factor = warmup_start_factor
     if min_lr_ratio is not None:
         cfg.min_lr_ratio = min_lr_ratio
+    if early_stop_patience is not None:
+        cfg.early_stop_patience = early_stop_patience
     if backbone is not None:
         cfg.backbone = backbone
     if backbone_preset is not None:
@@ -1347,6 +1351,7 @@ def load_checkpoint_training_runtime(
     warmup_epochs: int | None = None,
     warmup_start_factor: float | None = None,
     min_lr_ratio: float | None = None,
+    early_stop_patience: int | None = None,
     backbone: str | None = None,
     backbone_preset: str | None = None,
     pretrained: bool | None = None,
@@ -1372,6 +1377,7 @@ def load_checkpoint_training_runtime(
         warmup_epochs=warmup_epochs,
         warmup_start_factor=warmup_start_factor,
         min_lr_ratio=min_lr_ratio,
+        early_stop_patience=early_stop_patience,
         backbone=backbone,
         backbone_preset=backbone_preset,
         pretrained=pretrained,
@@ -1750,6 +1756,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Final LR as a fraction of the configured base LR for cosine decay",
     )
     ap.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=None,
+        help="Stop training after this many non-improving validation epochs",
+    )
+    ap.add_argument(
         "--backbone",
         default=None,
         help="Backbone name for training. Use 'resnet18' or a timm model like 'swinv2_cr_tiny_384'",
@@ -1808,6 +1820,7 @@ def run_train(args: argparse.Namespace) -> int:
             warmup_epochs=args.warmup_epochs,
             warmup_start_factor=args.warmup_start_factor,
             min_lr_ratio=args.min_lr_ratio,
+            early_stop_patience=args.early_stop_patience,
             backbone=args.backbone,
             backbone_preset=args.backbone_preset,
             pretrained=args.pretrained,
@@ -1832,6 +1845,13 @@ def run_train(args: argparse.Namespace) -> int:
         previous_eval_kp_error = resume_checkpoint.get("val_kp_error")
         if not isinstance(previous_eval_kp_error, (int, float)):
             previous_eval_kp_error = None
+        raw_epochs_without_improvement = resume_checkpoint.get(
+            "epochs_without_improvement", 0
+        )
+        if isinstance(raw_epochs_without_improvement, (int, float)):
+            epochs_without_improvement = max(int(raw_epochs_without_improvement), 0)
+        else:
+            epochs_without_improvement = 0
     else:
         resume_checkpoint = None
         cfg = config_from_args(
@@ -1843,6 +1863,7 @@ def run_train(args: argparse.Namespace) -> int:
             warmup_epochs=args.warmup_epochs,
             warmup_start_factor=args.warmup_start_factor,
             min_lr_ratio=args.min_lr_ratio,
+            early_stop_patience=args.early_stop_patience,
             backbone=args.backbone,
             backbone_preset=args.backbone_preset,
             pretrained=args.pretrained,
@@ -1866,6 +1887,10 @@ def run_train(args: argparse.Namespace) -> int:
         best = float("inf")
         best_kp_error = float("inf")
         previous_eval_kp_error = None
+        epochs_without_improvement = 0
+
+    if cfg.early_stop_patience is not None and not args.val_data:
+        raise ValueError("--val-data is required when early stopping is enabled")
 
     # Load items
     train_items, train_summary = load_frame_items_with_summary(args.train_data)
@@ -2000,7 +2025,15 @@ def run_train(args: argparse.Namespace) -> int:
             if alert is not None:
                 print(alert)
 
-            best_after_epoch = min(best, float(va["loss"]))
+            current_val_loss = float(va["loss"])
+            improved = current_val_loss < best
+            if improved:
+                best = current_val_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            best_after_epoch = float(best)
             best_kp_error_after_epoch = min(best_kp_error, current_eval_kp_error)
 
             ckpt = {
@@ -2014,10 +2047,11 @@ def run_train(args: argparse.Namespace) -> int:
                 "dist_head": dist_head.state_dict(),
                 "opt": opt.state_dict(),
                 "scheduler": scheduler_state_for_checkpoint(cfg, epoch, epoch_lr),
-                "val_loss": float(va["loss"]),
+                "val_loss": current_val_loss,
                 "val_kp_error": current_eval_kp_error,
-                "best_val_loss": float(best_after_epoch),
+                "best_val_loss": best_after_epoch,
                 "best_val_kp_error": float(best_kp_error_after_epoch),
+                "epochs_without_improvement": epochs_without_improvement,
                 "tensorboard": {
                     "logdir": tensorboard_dir,
                     "last_epoch": epoch,
@@ -2032,11 +2066,21 @@ def run_train(args: argparse.Namespace) -> int:
             }
 
             torch.save(ckpt, os.path.join(args.outdir, f"ckpt_epoch_{epoch:03d}.pt"))
-            if va["loss"] < best:
-                best = va["loss"]
-                ckpt["best_val_loss"] = float(best)
+            if improved:
                 writer.add_scalar("best/val_loss", best, epoch)
                 torch.save(ckpt, os.path.join(args.outdir, "best.pt"))
+            if (
+                cfg.early_stop_patience is not None
+                and epochs_without_improvement >= cfg.early_stop_patience
+            ):
+                print(
+                    f"early stopping at epoch {epoch:03d}: "
+                    f"val_loss={current_val_loss:.4f} best_val_loss={best:.4f} "
+                    f"patience={cfg.early_stop_patience}"
+                )
+                best_kp_error = best_kp_error_after_epoch
+                previous_eval_kp_error = current_eval_kp_error
+                break
             best_kp_error = best_kp_error_after_epoch
             previous_eval_kp_error = current_eval_kp_error
         writer.flush()
@@ -2109,6 +2153,10 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("--template-data is required in train mode")
         if not args.outdir:
             ap.error("--outdir is required in train mode")
+        if args.early_stop_patience is not None and args.early_stop_patience < 1:
+            ap.error("--early-stop-patience must be at least 1")
+        if args.early_stop_patience is not None and not args.val_data:
+            ap.error("--val-data is required when --early-stop-patience is set")
         if args.resume_checkpoint and not os.path.exists(args.resume_checkpoint):
             ap.error("--resume-checkpoint must point to an existing checkpoint")
         return run_train(args)
