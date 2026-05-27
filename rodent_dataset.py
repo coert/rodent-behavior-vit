@@ -14,7 +14,6 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-
 LOGGER = logging.getLogger(__name__)
 
 BODY_PARTS = [
