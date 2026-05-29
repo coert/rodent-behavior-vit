@@ -2,6 +2,20 @@
 
 This repository includes a reusable exporter that turns the sample images and DeepLabCut outputs into trainable annotation files, plus a pose-distance trainer that now reads those generated CSVs directly.
 
+## Data sources
+
+The commands in this repository expect the raw inputs to already be present in the workspace in these locations:
+
+- Positive labeled frames: `rodent-samples/pos`
+- Negative labeled frames: `rodent-samples/neg`
+- DeepLabCut inference outputs used to attach keypoints: `videos/deeplabcut_inference`
+- Source recordings used by classifier video inference: `Translational neuroimaging group - rodents/`
+- Ground-truth intervals used by the timeline recoder: `Translational neuroimaging group - rodents/video_data.csv`
+
+The annotation exporter uses the first three paths by default. If your data lives somewhere else, pass `--positive-root`, `--negative-root`, or `--dlc-root` to `main.py`.
+
+The classifier video and timeline steps use the recording exports under `Translational neuroimaging group - rodents/` together with the generated annotation CSVs under `generated/`.
+
 ## What it generates
 
 - One master CSV with image references, labels, split assignment, clip metadata, and one `x/y` coordinate pair per body part
@@ -167,6 +181,76 @@ uv run python swin2_model.py \
 Test-mode output now prints checkpoint provenance before the final metrics so you can see which training run, epoch, backbone, and TensorBoard directory produced the evaluated checkpoint.
 
 Legacy JSON inputs are still accepted, but the generated CSV workflow is now the primary path. Checkpoints remain self-contained; test-mode loading reconstructs the backbone from saved config and then loads the checkpoint weights.
+
+## Train and evaluate `swin2_classifier.py`
+
+The classifier is a separate binary behavior model that can reuse a trained pose backbone via `--init-checkpoint`. All project commands should run through `uv run`.
+
+Train a classifier from the generated annotation CSVs:
+
+```bash
+uv run python swin2_classifier.py \
+	--mode train \
+	--train-data generated/rodent_annotations_train.csv \
+	--val-data generated/rodent_annotations_val.csv \
+	--outdir runs/swin2-classifier \
+	--epochs 10 \
+	--batch-size 12 \
+	--num-workers 0 \
+	--backbone swinv2_cr_tiny_384 \
+	--backbone-preset balanced \
+	--init-checkpoint runs/swin2-balanced-bs48/best.pt
+```
+
+The repository includes [train.sh](train.sh) as a ready-to-run version of that command. It also writes TensorBoard logs under `runs/swin2-classifier/tensorboard`.
+
+Evaluate the held-out test split with a saved classifier checkpoint:
+
+```bash
+uv run python swin2_classifier.py \
+	--mode test \
+	--test-data generated/rodent_annotations_test.csv \
+	--checkpoint runs/swin2-classifier/best.pt
+```
+
+The repository includes [test.sh](test.sh), which runs this test command first and then recodes the generated video outputs with a timeline overlay.
+
+To run classifier inference on source videos and produce the `*_classified.mp4` plus `*_classifications.csv` files consumed by the recoder, use `classify-videos` mode:
+
+```bash
+uv run python swin2_classifier.py \
+	--mode classify-videos \
+	--test-data generated/rodent_annotations_test.csv \
+	--checkpoint runs/swin2-classifier/best.pt \
+	--video-root videos \
+	--output-dir generated/swin2_classifier_video_test
+```
+
+Useful optional flags are `--frame-stride`, `--threshold`, `--image-root`, and `--num-workers`.
+
+## Recode classifier videos with `recode_classifier_timeline.py`
+
+After `swin2_classifier.py --mode classify-videos` has written classified videos and per-frame CSVs, `recode_classifier_timeline.py` adds the timeline bar overlays, computes summary metrics, and writes a precision-recall diagram in the same directory.
+
+```bash
+uv run python recode_classifier_timeline.py \
+	--input-dir generated/swin2_classifier_video_test \
+	--bar-height 30 \
+	--slider-width 3 \
+	--ground-truth-csv "Translational neuroimaging group - rodents/video_data.csv" \
+	--annotations-csv generated/rodent_annotations_test.csv \
+	--prefix-buffer-frames 5 \
+	--postfix-buffer-frames 5
+```
+
+This is the second command in [test.sh](test.sh). The defaults already point at the repository's generated classifier output directory, ground-truth CSV, and test annotations CSV, so you only need to override them when you evaluate a different dataset or output location.
+
+For a full list of CLI options for either script:
+
+```bash
+uv run python swin2_classifier.py --help
+uv run python recode_classifier_timeline.py --help
+```
 
 ## Use the Dataset class
 
