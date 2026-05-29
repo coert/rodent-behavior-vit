@@ -28,7 +28,9 @@ VIDEO_SUFFIX = "_classified.mp4"
 CSV_SUFFIX = "_classifications.csv"
 OUTPUT_SUFFIX = "_classified_timeline.mp4"
 PR_CURVE_FILENAME = "classifier_precision_recall_curve.png"
-DEFAULT_GROUND_TRUTH_CSV = Path("Translational neuroimaging group - rodents/video_data.csv")
+DEFAULT_GROUND_TRUTH_CSV = Path(
+    "Translational neuroimaging group - rodents/video_data.csv"
+)
 DEFAULT_ANNOTATIONS_CSV = Path("generated/rodent_annotations_test.csv")
 BAR_HEIGHT = 30
 BAR_OPACITY = 0.67
@@ -89,7 +91,9 @@ def find_video_csv_pairs(input_dir: str | Path) -> list[VideoCsvPair]:
         recording_id = recording_id_from_video_path(video_path)
         csv_path = input_dir / f"{recording_id}{CSV_SUFFIX}"
         if not csv_path.exists():
-            raise FileNotFoundError(f"Missing classification CSV for {video_path}: {csv_path}")
+            raise FileNotFoundError(
+                f"Missing classification CSV for {video_path}: {csv_path}"
+            )
         pairs.append(
             VideoCsvPair(
                 recording_id=recording_id,
@@ -110,7 +114,9 @@ def validate_and_extract_predictions(
 ) -> list[str]:
     missing = REQUIRED_COLUMNS - set(classifications.columns)
     if missing:
-        raise ValueError(f"classification CSV is missing columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"classification CSV is missing columns: {', '.join(sorted(missing))}"
+        )
     if len(classifications) != frame_count:
         raise ValueError(
             f"CSV row count {len(classifications)} does not match video frame count {frame_count}"
@@ -120,7 +126,9 @@ def validate_and_extract_predictions(
     expected_frame_numbers = list(range(frame_count))
     actual_frame_numbers = ordered["frame_number"].astype(int).tolist()
     if actual_frame_numbers != expected_frame_numbers:
-        raise ValueError("classification CSV frame_number values must be contiguous from 0")
+        raise ValueError(
+            "classification CSV frame_number values must be contiguous from 0"
+        )
 
     predictions = ordered["prediction"].astype(str).tolist()
     invalid = sorted(set(predictions) - VALID_PREDICTIONS)
@@ -136,7 +144,9 @@ def validate_and_extract_probabilities(
 ) -> list[float]:
     missing = METRIC_COLUMNS - set(classifications.columns)
     if missing:
-        raise ValueError(f"classification CSV is missing columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"classification CSV is missing columns: {', '.join(sorted(missing))}"
+        )
     if len(classifications) != frame_count:
         raise ValueError(
             f"CSV row count {len(classifications)} does not match video frame count {frame_count}"
@@ -146,10 +156,14 @@ def validate_and_extract_probabilities(
     expected_frame_numbers = list(range(frame_count))
     actual_frame_numbers = ordered["frame_number"].astype(int).tolist()
     if actual_frame_numbers != expected_frame_numbers:
-        raise ValueError("classification CSV frame_number values must be contiguous from 0")
+        raise ValueError(
+            "classification CSV frame_number values must be contiguous from 0"
+        )
 
     probabilities = ordered["probability"].astype(float).tolist()
-    invalid = [probability for probability in probabilities if not 0.0 <= probability <= 1.0]
+    invalid = [
+        probability for probability in probabilities if not 0.0 <= probability <= 1.0
+    ]
     if invalid:
         raise ValueError("classification probabilities must be between 0 and 1")
     return probabilities
@@ -185,7 +199,9 @@ def build_timeline_bar(
     bar = np.empty((height, width, 3), dtype=np.uint8)
     frame_count = len(predictions)
     for x in range(width):
-        prediction = predictions[timeline_frame_index(x, width=width, frame_count=frame_count)]
+        prediction = predictions[
+            timeline_frame_index(x, width=width, frame_count=frame_count)
+        ]
         bar[:, x] = grab_color if prediction == "grab" else no_grab_color
     return bar
 
@@ -199,12 +215,20 @@ def load_ground_truth_csv(path: str | Path) -> pd.DataFrame:
         GROUND_TRUTH_END_COLUMN,
     } - set(ground_truth.columns)
     if missing:
-        raise ValueError(f"ground-truth CSV is missing columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"ground-truth CSV is missing columns: {', '.join(sorted(missing))}"
+        )
     return ground_truth
 
 
+def is_missing_scalar(value: object) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    return isinstance(value, (float, np.floating)) and bool(np.isnan(value))
+
+
 def parse_timestamp_seconds(value: object) -> float | None:
-    if pd.isna(value):
+    if is_missing_scalar(value):
         return None
     text = str(value).strip()
     if not text:
@@ -272,9 +296,13 @@ def video_data_ranges_for_recording(
         GROUND_TRUTH_END_COLUMN,
     } - set(normalized.columns)
     if missing:
-        raise ValueError(f"ground-truth CSV is missing columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"ground-truth CSV is missing columns: {', '.join(sorted(missing))}"
+        )
 
-    video_stems = normalized[GROUND_TRUTH_VIDEO_COLUMN].astype(str).map(lambda name: Path(name).stem)
+    video_stems = normalized[GROUND_TRUTH_VIDEO_COLUMN].map(
+        lambda name: "" if is_missing_scalar(name) else Path(str(name)).stem
+    )
     rows = normalized[video_stems == recording_id]
     if rows.empty:
         raise ValueError(f"No ground-truth rows found for recording_id: {recording_id}")
@@ -322,7 +350,9 @@ def load_annotations_csv(path: str | Path) -> pd.DataFrame:
     annotations = annotations.rename(columns=lambda column: str(column).strip())
     missing = ANNOTATION_COLUMNS - set(annotations.columns)
     if missing:
-        raise ValueError(f"annotations CSV is missing columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"annotations CSV is missing columns: {', '.join(sorted(missing))}"
+        )
     return annotations
 
 
@@ -362,7 +392,9 @@ def annotation_ranges_for_recording(
     normalized = annotations.rename(columns=lambda column: str(column).strip())
     missing = ANNOTATION_COLUMNS - set(normalized.columns)
     if missing:
-        raise ValueError(f"annotations CSV is missing columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"annotations CSV is missing columns: {', '.join(sorted(missing))}"
+        )
 
     rows = normalized[normalized["recording_id"].astype(str) == recording_id]
     if rows.empty:
@@ -415,7 +447,10 @@ def warn_unmatched_video_data_ranges(
     annotation_ranges: Sequence[FrameRange],
 ) -> None:
     for video_data_range in video_data_ranges:
-        if any(ranges_overlap(video_data_range, annotation_range) for annotation_range in annotation_ranges):
+        if any(
+            ranges_overlap(video_data_range, annotation_range)
+            for annotation_range in annotation_ranges
+        ):
             continue
         print(
             "WARNING: video_data ground truth range has no annotation-derived overlap: "
@@ -482,7 +517,9 @@ def calculate_classifier_metrics(
     predictions: Sequence[str],
 ) -> ClassifierMetrics:
     if len(true_labels) != len(probabilities) or len(true_labels) != len(predictions):
-        raise ValueError("true_labels, probabilities, and predictions must have matching lengths")
+        raise ValueError(
+            "true_labels, probabilities, and predictions must have matching lengths"
+        )
     if not true_labels:
         raise ValueError("metrics require at least one frame")
 
@@ -524,11 +561,17 @@ def collect_metric_inputs(
     if fps <= 0:
         raise ValueError(f"Could not determine FPS for video: {pair.video_path}")
     if frame_count <= 0:
-        raise ValueError(f"Could not determine frame count for video: {pair.video_path}")
+        raise ValueError(
+            f"Could not determine frame count for video: {pair.video_path}"
+        )
 
     classifications = pd.read_csv(pair.csv_path)
-    predictions = validate_and_extract_predictions(classifications, frame_count=frame_count)
-    probabilities = validate_and_extract_probabilities(classifications, frame_count=frame_count)
+    predictions = validate_and_extract_predictions(
+        classifications, frame_count=frame_count
+    )
+    probabilities = validate_and_extract_probabilities(
+        classifications, frame_count=frame_count
+    )
     true_labels = ground_truth_predictions_for_recording(
         ground_truth,
         recording_id=pair.recording_id,
@@ -548,7 +591,9 @@ def save_precision_recall_diagram(
     FigureCanvas(fig)
     ax = fig.subplots()
     ax.plot(metrics.pr_recalls, metrics.pr_precisions, color="#1f77b4", linewidth=2)
-    ax.set_title(f"Precision-Recall Curve (AUC={metrics.pr_auc:.3f}, F1={metrics.f1:.3f})")
+    ax.set_title(
+        f"Precision-Recall Curve (AUC={metrics.pr_auc:.3f}, F1={metrics.f1:.3f})"
+    )
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
     ax.set_xlim(0.0, 1.0)
@@ -660,12 +705,16 @@ def recode_video_with_timeline(
     if fps <= 0:
         raise ValueError(f"Could not determine FPS for video: {pair.video_path}")
     if frame_count <= 0:
-        raise ValueError(f"Could not determine frame count for video: {pair.video_path}")
+        raise ValueError(
+            f"Could not determine frame count for video: {pair.video_path}"
+        )
     if width <= 0 or height <= 0:
         raise ValueError(f"Could not determine frame size for video: {pair.video_path}")
 
     classifications = pd.read_csv(pair.csv_path)
-    predictions = validate_and_extract_predictions(classifications, frame_count=frame_count)
+    predictions = validate_and_extract_predictions(
+        classifications, frame_count=frame_count
+    )
     classifier_bar = build_timeline_bar(predictions, width=width, height=bar_height)
     annotation_ranges = annotation_ranges_for_recording(
         annotations,
